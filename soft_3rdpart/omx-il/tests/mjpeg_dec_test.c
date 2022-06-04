@@ -3,6 +3,7 @@
  * Copyright (C) 2021 StarFive Technology Co., Ltd.
  */
 #include <stdio.h>
+#include <unistd.h>
 #include <signal.h>
 #include <getopt.h>
 #include <fcntl.h>
@@ -43,6 +44,14 @@ typedef struct DecodeTestContext
     OMX_BUFFERHEADERTYPE *pOutputBufferArray[64];
     AVFormatContext *avContext;
     int msgid;
+    OMX_S32 RoiLeft;
+    OMX_S32 RoiTop;
+    OMX_U32 RoiWidth;
+    OMX_U32 RoiHeight;
+    OMX_U32 Rotation;
+    OMX_U32 Mirror;
+    OMX_U32 ScaleFactorH;
+    OMX_U32 ScaleFactorV;
 } DecodeTestContext;
 DecodeTestContext *decodeTestContext;
 static OMX_S32 FillInputBuffer(DecodeTestContext *decodeTestContext, OMX_BUFFERHEADERTYPE *pInputBuffer);
@@ -67,7 +76,7 @@ static OMX_ERRORTYPE event_handler(
         OMX_GetParameter(pDecodeTestContext->hComponentDecoder, OMX_IndexParamPortDefinition, &pOutputPortDefinition);
         OMX_U32 nOutputBufferSize = pOutputPortDefinition.nBufferSize;
         OMX_U32 nOutputBufferCount = pOutputPortDefinition.nBufferCountMin;
-        printf("allocate %d output buffers size %d\r\n", nOutputBufferCount, nOutputBufferSize);
+        printf("allocate %lu output buffers size %lu\r\n", nOutputBufferCount, nOutputBufferSize);
         for (int i = 0; i < nOutputBufferCount; i++)
         {
             OMX_BUFFERHEADERTYPE *pBuffer = NULL;
@@ -108,7 +117,7 @@ static OMX_ERRORTYPE fill_output_buffer_done_handler(
 
     Message data;
     data.msg_type = 1;
-    if (pBuffer->nFlags & OMX_BUFFERFLAG_EOS == OMX_BUFFERFLAG_EOS)
+    if ((pBuffer->nFlags) & (OMX_BUFFERFLAG_EOS == OMX_BUFFERFLAG_EOS))
     {
         data.msg_flag = -1;
     }
@@ -171,19 +180,20 @@ static OMX_S32 FillInputBuffer(DecodeTestContext *decodeTestContext, OMX_BUFFERH
         }
         else
         {
-            printf("%s:%d failed to av_read_frame error(0x%08x)\n", __FUNCTION__, __LINE__, error);
+            printf("%s:%d failed to av_read_frame, error: %s\n",
+                    __FUNCTION__, __LINE__, av_err2str(error));
             return 0;
         }
     }
     pInputBuffer->nFlags = 0x10;
     pInputBuffer->nFilledLen = avpacket.size;
     memcpy(pInputBuffer->pBuffer, avpacket.data, avpacket.size);
-    printf("%s, address = %p, size = %d, flag = %x\r\n", 
+    printf("%s, address = %p, size = %lu, flag = %lx\r\n",
         __FUNCTION__, pInputBuffer->pBuffer, pInputBuffer->nFilledLen, pInputBuffer->nFlags);
     return avpacket.size;
 }
 
-int main(int argc, char *argv)
+int main(int argc, char **argv)
 {
     printf("=============================\r\n");
     OMX_S32 error;
@@ -195,18 +205,24 @@ int main(int argc, char *argv)
     if (msgid < 0)
     {
         perror("get ipc_id error");
-        return;
+        return -1;
     }
     decodeTestContext->msgid = msgid;
     struct option longOpt[] = {
         {"output", required_argument, NULL, 'o'},
         {"input", required_argument, NULL, 'i'},
         {"format", required_argument, NULL, 'f'},
+        {"roi", required_argument, NULL, 'c'},
+        {"rotation", required_argument, NULL, 'r'},
+        {"mirror", required_argument, NULL, 'm'},
+        {"scaleH", required_argument, NULL, 'H'},
+        {"scaleV", required_argument, NULL, 'V'},
         {NULL, no_argument, NULL, 0},
     };
-    OMX_S8 *shortOpt = "i:o:f:";
+    char *shortOpt = "i:o:f:c:r:m:";
     OMX_U32 c;
     OMX_S32 l;
+    OMX_STRING val;
 
     // if (argc == 0)
     // {
@@ -214,7 +230,7 @@ int main(int argc, char *argv)
     //     return;
     // }
 
-    while ((c = getopt_long(argc, argv, shortOpt, longOpt, &l)) != -1)
+    while ((c = getopt_long(argc, argv, shortOpt, longOpt, (int *)&l)) != -1)
     {
         switch (c)
         {
@@ -227,7 +243,7 @@ int main(int argc, char *argv)
             else
             {
                 printf("input file not exist!\r\n");
-                return;
+                return -1;
             }
             break;
         case 'o':
@@ -238,17 +254,63 @@ int main(int argc, char *argv)
             printf("format: %s\r\n", optarg);
             memcpy(decodeTestContext->sOutputFormat, optarg, strlen(optarg));
             break;
+        case 'c':
+            val = strtok(optarg, ",");
+            if (val == NULL) {
+                printf("Invalid ROI option: %s\n", optarg);
+                return -1;
+            }
+            else {
+                decodeTestContext->RoiLeft = atoi(val);
+            }
+            val = strtok(NULL, ",");
+            if (val == NULL) {
+                printf("Invalid ROI option: %s\n", optarg);
+                return -1;
+            }
+            else {
+                decodeTestContext->RoiTop = atoi(val);
+            }
+            val = strtok(NULL, ",");
+            if (val == NULL) {
+                printf("Invalid ROI option: %s\n", optarg);
+                return -1;
+            }
+            else {
+                decodeTestContext->RoiWidth = atoi(val);
+            }
+            val = strtok(NULL, ",");
+            if (val == NULL) {
+                printf("Invalid ROI option: %s\n", optarg);
+                return -1;
+            }
+            else {
+                decodeTestContext->RoiHeight = atoi(val);
+            }
+            break;
+        case 'r':
+            decodeTestContext->Rotation = atoi(optarg);
+            break;
+        case 'm':
+            decodeTestContext->Mirror = atoi(optarg);
+            break;
+        case 'H':
+            decodeTestContext->ScaleFactorH = atoi(optarg);
+            break;
+        case 'V':
+            decodeTestContext->ScaleFactorV = atoi(optarg);
+            break;
         case 'h':
         default:
             help();
-            return;
+            return -1;
         }
     }
 
     if (decodeTestContext->sInputFilePath == NULL || decodeTestContext->sOutputFilePath == NULL)
     {
         help();
-        return;
+        return -1;
     }
     /*ffmpeg init*/
     printf("init ffmpeg\r\n");
@@ -259,24 +321,24 @@ int main(int argc, char *argv)
     if ((avContext = avformat_alloc_context()) == NULL)
     {
         printf("avformat_alloc_context fail\r\n");
-        return;
+        return -1;
     }
     avContext->flags |= AV_CODEC_FLAG_TRUNCATED;
 
     printf("avformat_open_input\r\n");
     if ((error = avformat_open_input(&avContext, decodeTestContext->sInputFilePath, fmt, NULL)))
     {
-        printf("%s:%d failed to av_open_input_file error(%d), %s\n",
-               __FILE__, __LINE__, error, decodeTestContext->sInputFilePath);
-        return;
+        printf("%s:%d failed to av_open_input_file error(%s), %s\n",
+               __FILE__, __LINE__, av_err2str(error), decodeTestContext->sInputFilePath);
+        return -1;
     }
 
     printf("avformat_find_stream_info\r\n");
     if ((error = avformat_find_stream_info(avContext, NULL)) < 0)
     {
-        printf("%s:%d failed to avformat_find_stream_info. error(%d)\n",
-               __FUNCTION__, __LINE__, error);
-        return;
+        printf("%s:%d failed to avformat_find_stream_info. error(%s)\n",
+               __FUNCTION__, __LINE__, av_err2str(error));
+        return -1;
     }
 
     printf("av_find_best_stream\r\n");
@@ -284,9 +346,9 @@ int main(int argc, char *argv)
     if (imageIndex < 0)
     {
         printf("%s:%d failed to av_find_best_stream.\n", __FUNCTION__, __LINE__);
-        return;
+        return -1;
     }
-    printf("image index = %d\r\n", imageIndex);
+    printf("image index = %lu\r\n", imageIndex);
     decodeTestContext->avContext = avContext;
     /*get image info*/
     codecParameters = avContext->streams[imageIndex]->codecpar;
@@ -334,11 +396,47 @@ int main(int argc, char *argv)
     }
     else if (strstr(decodeTestContext->sOutputFormat, "nv21") != NULL)
     {
-        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV420PackedSemiPlanar;
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYVU420SemiPlanar;
     }
     else if (strstr(decodeTestContext->sOutputFormat, "i420") != NULL)
     {
         pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV420Planar;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "i422") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV422Planar;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "nv16") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV422SemiPlanar;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "nv61") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYVU422SemiPlanar;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "yuyv") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYCbYCr;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "yvyu") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYCrYCb;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "uyvy") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatCbYCrY;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "vyuy") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatCrYCbY;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "i444") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV444Planar;
+    }
+    else if (strstr(decodeTestContext->sOutputFormat, "yuv444packed") != NULL)
+    {
+        pOutputPortDefinition.format.video.eColorFormat = OMX_COLOR_FormatYUV444Interleaved;
     }
     else
     {
@@ -346,6 +444,55 @@ int main(int argc, char *argv)
         goto end;
     }
     OMX_SetParameter(hComponentDecoder, OMX_IndexParamPortDefinition, &pOutputPortDefinition);
+
+    /* Set Roi config setting*/
+    if(decodeTestContext->RoiWidth && decodeTestContext->RoiHeight)
+    {
+        OMX_CONFIG_RECTTYPE RectConfig;
+        OMX_INIT_STRUCTURE(RectConfig);
+        RectConfig.nPortIndex = 1;
+        OMX_GetConfig(hComponentDecoder, OMX_IndexConfigCommonOutputCrop, &RectConfig);
+        RectConfig.nLeft = decodeTestContext->RoiLeft;
+        RectConfig.nTop = decodeTestContext->RoiTop;
+        RectConfig.nWidth = decodeTestContext->RoiWidth;
+        RectConfig.nHeight = decodeTestContext->RoiHeight;
+        OMX_SetConfig(hComponentDecoder, OMX_IndexConfigCommonOutputCrop, &RectConfig);
+    }
+
+    /* Set Rotation config setting*/
+    if(decodeTestContext->Rotation)
+    {
+        OMX_CONFIG_ROTATIONTYPE RotatConfig;
+        OMX_INIT_STRUCTURE(RotatConfig);
+        RotatConfig.nPortIndex = 1;
+        OMX_GetConfig(hComponentDecoder, OMX_IndexConfigCommonRotate, &RotatConfig);
+        RotatConfig.nRotation = decodeTestContext->Rotation;
+        OMX_SetConfig(hComponentDecoder, OMX_IndexConfigCommonRotate, &RotatConfig);
+    }
+
+    /* Set Mirror config setting*/
+    if(decodeTestContext->Mirror)
+    {
+        OMX_CONFIG_MIRRORTYPE MirrorConfig;
+        OMX_INIT_STRUCTURE(MirrorConfig);
+        MirrorConfig.nPortIndex = 1;
+        OMX_GetConfig(hComponentDecoder, OMX_IndexConfigCommonMirror, &MirrorConfig);
+        MirrorConfig.eMirror = decodeTestContext->Mirror;
+        OMX_SetConfig(hComponentDecoder, OMX_IndexConfigCommonMirror, &MirrorConfig);
+    }
+
+    /* Set Scale config setting*/
+    if(decodeTestContext->ScaleFactorH || decodeTestContext->ScaleFactorV)
+    {
+        OMX_CONFIG_SCALEFACTORTYPE ScaleConfig;
+        OMX_INIT_STRUCTURE(ScaleConfig);
+        ScaleConfig.nPortIndex = 1;
+        OMX_GetConfig(hComponentDecoder, OMX_IndexConfigCommonScale, &ScaleConfig);
+        /* in Q16 format */
+        ScaleConfig.xWidth = (1 << 16) >> (decodeTestContext->ScaleFactorH & 0x3);
+        ScaleConfig.xHeight = (1 << 16) >> (decodeTestContext->ScaleFactorV & 0x3);
+        OMX_SetConfig(hComponentDecoder, OMX_IndexConfigCommonScale, &ScaleConfig);
+    }
 
     OMX_SendCommand(hComponentDecoder, OMX_CommandStateSet, OMX_StateIdle, NULL);
 
@@ -395,14 +542,14 @@ int main(int argc, char *argv)
         {
             OMX_BUFFERHEADERTYPE *pBuffer = data.pBuffer;
             OMX_STRING sFilePath = decodeTestContext->sOutputFilePath;
-            printf("write %d buffers to file\r\n", pBuffer->nFilledLen);
+            printf("write %lu buffers to file\r\n", pBuffer->nFilledLen);
             FILE *fb = fopen(sFilePath, "ab+");
             size_t size = fwrite(pBuffer->pBuffer, 1, pBuffer->nFilledLen, fb);
             int error = ferror(fb);
             printf("write error = %d\r\n", error);
             fclose(fb);
-            printf("write %d buffers finish\r\n", size);
-            if (pBuffer->nFlags & OMX_BUFFERFLAG_EOS == OMX_BUFFERFLAG_EOS)
+            printf("write %lu buffers finish\r\n", size);
+            if ((pBuffer->nFlags) & (OMX_BUFFERFLAG_EOS == OMX_BUFFERFLAG_EOS))
             {
                 goto end;
             }

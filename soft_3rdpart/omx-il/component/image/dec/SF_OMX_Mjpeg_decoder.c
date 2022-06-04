@@ -4,6 +4,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include "SF_OMX_mjpeg_common.h"
 #include "SF_OMX_Core.h"
@@ -12,12 +13,6 @@
 extern OMX_TICKS gInitTimeStamp;
 #define TEMP_DEBUG 1
 #define NUM_OF_PORTS 2
-
-static char *Event2Str(unsigned long event)
-{
-    char *event_str = NULL;
-    return event_str;
-}
 
 static OMX_ERRORTYPE SF_OMX_EmptyThisBuffer(
     OMX_IN OMX_HANDLETYPE hComponent,
@@ -40,7 +35,7 @@ static OMX_ERRORTYPE SF_OMX_EmptyThisBuffer(
 
     LOG(SF_LOG_DEBUG, "nFilledLen = %d, nFlags = %d, pBuffer = %p\r\n", pBuffer->nFilledLen, pBuffer->nFlags, pBuffer->pBuffer);
 
-    if (pBuffer->nFilledLen == 0 || pBuffer->nFlags & 0x1 == 0x1)
+    if (pBuffer->nFilledLen == 0 || (pBuffer->nFlags & 0x1) == 0x1)
     {
         bSendNULL = OMX_TRUE;
     }
@@ -84,8 +79,10 @@ EXIT:
 }
 
 #define MAX_INDEX 1
-static int frame_array[MAX_INDEX] = {-1};
-static int frame_array_index = 0;
+#define MCA_MAX_INDEX 1
+Message mesCacheArr[MCA_MAX_INDEX];
+int MCAIndex = 0;
+int dataCount = 0;
 
 static OMX_ERRORTYPE SF_OMX_FillThisBuffer(
     OMX_IN OMX_HANDLETYPE hComponent,
@@ -108,13 +105,30 @@ static OMX_ERRORTYPE SF_OMX_FillThisBuffer(
     // {
     //     return OMX_ErrorInsufficientResources;
     // }
-    StoreOMXBuffer(pSfOMXComponent, pBuffer);
-    Message data;
+    Message data,outputData;
     data.msg_type = 1;
     data.msg_flag = 0;
     data.pBuffer = pBuffer;
+
+    // TODO start:
+    // Temporary store one buff here to prevent the buff from being refill too soon.
+    // It is a workaround for issue and should be fixed further.
+    MCAIndex = (dataCount++)%MCA_MAX_INDEX;
+    if(dataCount < MCA_MAX_INDEX)
+    {
+        mesCacheArr[MCAIndex] = data;
+        FunctionOut();
+        return ret;
+    }
+    else
+    {
+        outputData = mesCacheArr[MCAIndex];
+        mesCacheArr[MCAIndex] = data;
+    }
+    // TODO end
+
     LOG(SF_LOG_DEBUG, "Send to message queue\r\n");
-    if (msgsnd(pSfCodaj12Implement->sOutputMessageQueue, (void *)&data, sizeof(data) - sizeof(data.msg_type), 0) == -1)
+    if (msgsnd(pSfCodaj12Implement->sOutputMessageQueue, (void *)&outputData, sizeof(data) - sizeof(data.msg_type), 0) == -1)
     {
         LOG(SF_LOG_ERR, "msgsnd failed\n");
     }
@@ -124,7 +138,7 @@ EXIT:
     return ret;
 }
 
-static int nOutBufIndex = 0;
+static OMX_U64 nOutBufIndex = 0;
 
 static OMX_ERRORTYPE SF_OMX_UseBuffer(
     OMX_IN OMX_HANDLETYPE hComponent,
@@ -166,7 +180,9 @@ static OMX_ERRORTYPE SF_OMX_UseBuffer(
         temp_bufferHeader->pOutputPortPrivate = (OMX_PTR)nOutBufIndex;
         nOutBufIndex ++;
     }
-    LOG(SF_LOG_DEBUG, "pBuffer address = %p, nOutBufIndex = %d\r\n", temp_bufferHeader->pBuffer, (int)temp_bufferHeader->pOutputPortPrivate);
+    LOG(SF_LOG_DEBUG, "pBuffer address = %p, nOutBufIndex = %d\r\n", temp_bufferHeader->pBuffer, (OMX_U64)temp_bufferHeader->pOutputPortPrivate);
+
+    pSfCodaj12Implement->allocBufFlag = OMX_FALSE;
 EXIT:
     FunctionOut();
 
@@ -205,6 +221,9 @@ static OMX_ERRORTYPE SF_OMX_AllocateBuffer(
     if (nPortIndex == 1)
     {
         temp_bufferHeader->pBuffer = AllocateOutputBuffer(pSfOMXComponent, nSizeBytes);
+        temp_bufferHeader->pOutputPortPrivate = (OMX_PTR)nOutBufIndex;
+        nOutBufIndex ++;
+        pSfCodaj12Implement->allocBufFlag = OMX_TRUE;
         // temp_bufferHeader->nFilledLen = nSizeBytes;
     }
     else if (nPortIndex == 0)
@@ -217,7 +236,7 @@ static OMX_ERRORTYPE SF_OMX_AllocateBuffer(
             LOG(SF_LOG_ERR, "fail to allocate bitstream buffer\r\n");
             return OMX_ErrorInsufficientResources;
         }
-        temp_bufferHeader->pBuffer = vbStream->virt_addr;
+        temp_bufferHeader->pBuffer = (OMX_U8 *)vbStream->virt_addr;
         temp_bufferHeader->pInputPortPrivate = (void *)vbStream->phys_addr;
     }
 
@@ -242,7 +261,6 @@ static OMX_ERRORTYPE SF_OMX_GetParameter(
     OMX_ERRORTYPE ret = OMX_ErrorNone;
     OMX_COMPONENTTYPE *pOMXComponent = (OMX_COMPONENTTYPE *)hComponent;
     SF_OMX_COMPONENT *pSfOMXComponent = pOMXComponent->pComponentPrivate;
-    SF_CODAJ12_IMPLEMEMT *pSfMjpegImplement = (SF_CODAJ12_IMPLEMEMT *)pSfOMXComponent->componentImpl;
 
     FunctionIn();
     if (hComponent == NULL)
@@ -271,7 +289,7 @@ static OMX_ERRORTYPE SF_OMX_GetParameter(
 
     case OMX_IndexParamImagePortFormat:
     {
-        OMX_IMAGE_PARAM_PORTFORMATTYPE *portFormat = (OMX_VIDEO_PARAM_PORTFORMATTYPE *)ComponentParameterStructure;
+        OMX_IMAGE_PARAM_PORTFORMATTYPE *portFormat = (OMX_IMAGE_PARAM_PORTFORMATTYPE *)ComponentParameterStructure;
         OMX_U32 index = portFormat->nIndex;
         switch (index)
         {
@@ -326,7 +344,7 @@ static OMX_ERRORTYPE SF_OMX_GetParameter(
             portFormat->eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar; //NV12
             break;
         case 4:
-            portFormat->eColorFormat = OMX_COLOR_FormatYUV420PackedSemiPlanar; //NV21
+            portFormat->eColorFormat = OMX_COLOR_FormatYVU420SemiPlanar; //NV21
             break;
         default:
             if (index > 0)
@@ -443,22 +461,73 @@ static OMX_ERRORTYPE SF_OMX_SetParameter(
                     case OMX_COLOR_FormatYUV420Planar:
                         decConfig->cbcrInterleave = CBCR_SEPARATED;
                         decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_420;
                         pOutputPort->nBufferSize = (width * height * 3) / 2;
                         break;
                     case OMX_COLOR_FormatYUV420SemiPlanar: //NV12
                         decConfig->cbcrInterleave = CBCR_INTERLEAVE;
                         decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_420;
                         pOutputPort->nBufferSize = (width * height * 3) / 2;
                         break;
-                    case OMX_COLOR_FormatYUV420PackedSemiPlanar: //NV21
+                    case OMX_COLOR_FormatYVU420SemiPlanar: //NV21
                         decConfig->cbcrInterleave = CRCB_INTERLEAVE;
                         decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_420;
                         pOutputPort->nBufferSize = (width * height * 3) / 2;
                         break;
                     case OMX_COLOR_FormatYUV422Planar:
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
                         pOutputPort->nBufferSize = width * height * 2;
                         break;
-                    case OMX_COLOR_FormatYUV444Interleaved:
+                    case OMX_COLOR_FormatYUV422SemiPlanar: //NV16
+                        decConfig->cbcrInterleave = CBCR_INTERLEAVE;
+                        decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatYVU422SemiPlanar: //NV61
+                        decConfig->cbcrInterleave = CRCB_INTERLEAVE;
+                        decConfig->packedFormat = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatYCbYCr: //YUYV
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_422_YUYV;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatYCrYCb: //YVYU
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_422_YVYU;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatCbYCrY: //UYVY
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_422_UYVY;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatCrYCbY: //VYUY
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_422_VYUY;
+                        pSfMjpegImplement->frameFormat = FORMAT_422;
+                        pOutputPort->nBufferSize = width * height * 2;
+                        break;
+                    case OMX_COLOR_FormatYUV444Planar: //I444
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_NONE;
+                        pSfMjpegImplement->frameFormat = FORMAT_444;
+                        pOutputPort->nBufferSize = width * height * 3;
+                        break;
+                    case OMX_COLOR_FormatYUV444Interleaved: //YUV444PACKED
+                        decConfig->cbcrInterleave = CBCR_SEPARATED;
+                        decConfig->packedFormat   = PACKED_FORMAT_444;
+                        pSfMjpegImplement->frameFormat = FORMAT_444;
                         pOutputPort->nBufferSize = width * height * 3;
                         break;
                     default:
@@ -486,25 +555,60 @@ static OMX_ERRORTYPE SF_OMX_SetParameter(
             decConfig->cbcrInterleave = CBCR_SEPARATED;
             decConfig->packedFormat = PACKED_FORMAT_NONE;
             pSfMjpegImplement->frameFormat = FORMAT_420;
-            pPort->format.video.eColorFormat = portFormat->eColorFormat;
             break;
         case OMX_COLOR_FormatYUV420SemiPlanar: //NV12
             decConfig->cbcrInterleave = CBCR_INTERLEAVE;
             decConfig->packedFormat = PACKED_FORMAT_NONE;
             pSfMjpegImplement->frameFormat = FORMAT_420;
-            pPort->format.video.eColorFormat = portFormat->eColorFormat;
             break;
-        case OMX_COLOR_FormatYUV420PackedSemiPlanar: //NV21
+        case OMX_COLOR_FormatYVU420SemiPlanar: //NV21
             decConfig->cbcrInterleave = CRCB_INTERLEAVE;
             decConfig->packedFormat = PACKED_FORMAT_NONE;
             pSfMjpegImplement->frameFormat = FORMAT_420;
-            pPort->format.video.eColorFormat = portFormat->eColorFormat;
             break;
         case OMX_COLOR_FormatYUV422Planar:
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat = PACKED_FORMAT_NONE;
             pSfMjpegImplement->frameFormat = FORMAT_422;
-            pPort->format.video.eColorFormat = portFormat->eColorFormat;
             break;
-        case OMX_COLOR_FormatYUV444Interleaved:
+        case OMX_COLOR_FormatYUV422SemiPlanar: //NV16
+            decConfig->cbcrInterleave = CBCR_INTERLEAVE;
+            decConfig->packedFormat = PACKED_FORMAT_NONE;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatYVU422SemiPlanar: //NV61
+            decConfig->cbcrInterleave = CRCB_INTERLEAVE;
+            decConfig->packedFormat = PACKED_FORMAT_NONE;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatYCbYCr: //YUYV
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_422_YUYV;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatYCrYCb: //YVYU
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_422_YVYU;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatCbYCrY: //UYVY
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_422_UYVY;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatCrYCbY: //VYUY
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_422_VYUY;
+            pSfMjpegImplement->frameFormat = FORMAT_422;
+            break;
+        case OMX_COLOR_FormatYUV444Planar: //I444
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_NONE;
+            pSfMjpegImplement->frameFormat = FORMAT_444;
+            break;
+        case OMX_COLOR_FormatYUV444Interleaved: //YUV444PACKED
+            decConfig->cbcrInterleave = CBCR_SEPARATED;
+            decConfig->packedFormat   = PACKED_FORMAT_444;
             pSfMjpegImplement->frameFormat = FORMAT_444;
             pPort->format.video.eColorFormat = portFormat->eColorFormat;
             break;
@@ -512,6 +616,9 @@ static OMX_ERRORTYPE SF_OMX_SetParameter(
             ret = OMX_ErrorNotImplemented;
             break;
         }
+        if(!ret)
+            pPort->format.video.eColorFormat = portFormat->eColorFormat;
+        break;
     }
     case OMX_IndexParamVideoInit:
     {
@@ -544,9 +651,100 @@ static OMX_ERRORTYPE SF_OMX_GetConfig(
     FunctionIn();
     if (hComponent == NULL)
     {
-        return OMX_ErrorBadParameter;
+        ret = OMX_ErrorBadParameter;
+        goto EXIT;
     }
 
+    if (pComponentConfigStructure == NULL)
+    {
+        ret = OMX_ErrorBadParameter;
+        goto EXIT;
+    }
+
+    LOG(SF_LOG_INFO, "Get config on index %X\r\n", nIndex);
+    OMX_COMPONENTTYPE *pOMXComponent = (OMX_COMPONENTTYPE *)hComponent;
+    SF_OMX_COMPONENT *pSfOMXComponent = pOMXComponent->pComponentPrivate;
+    SF_CODAJ12_IMPLEMEMT *pSfMjpegImplement = (SF_CODAJ12_IMPLEMEMT *)pSfOMXComponent->componentImpl;
+
+    switch ((OMX_U32)nIndex)
+    {
+    case OMX_IndexConfigCommonOutputCrop:
+    {
+        OMX_CONFIG_RECTTYPE *rectParam = (OMX_CONFIG_RECTTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(rectParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            rectParam->nLeft = decConfig->roiOffsetX;
+            rectParam->nTop = decConfig->roiOffsetY;
+            rectParam->nWidth = decConfig->roiWidth;
+            rectParam->nHeight = decConfig->roiHeight;
+            LOG(SF_LOG_INFO, "Get OutputCrop left %d top %d width %d height %d \r\n",
+                decConfig->roiOffsetX, decConfig->roiOffsetY, decConfig->roiWidth, decConfig->roiHeight);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support OutputCrop param\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonRotate:
+    {
+        OMX_CONFIG_ROTATIONTYPE *rotatParam = (OMX_CONFIG_ROTATIONTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(rotatParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            rotatParam->nRotation = decConfig->rotation;
+            LOG(SF_LOG_INFO, "Get Rotation %d \r\n", decConfig->rotation);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support Rotation config\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonMirror:
+    {
+        OMX_CONFIG_MIRRORTYPE *mirrParam = (OMX_CONFIG_MIRRORTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(mirrParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            mirrParam->eMirror = decConfig->mirror;
+            LOG(SF_LOG_INFO, "Get Mirror %d \r\n", decConfig->mirror);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support Mirror config\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonScale:
+    {
+        OMX_CONFIG_SCALEFACTORTYPE *scaleParam = (OMX_CONFIG_SCALEFACTORTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(scaleParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            /* In Q16 format */
+            scaleParam->xWidth = (1 << 16) >> decConfig->iHorScaleMode;
+            scaleParam->xHeight = (1 << 16) >> decConfig->iVerScaleMode;
+            LOG(SF_LOG_INFO, "Get scale  %d(Q16),%d(Q16) \r\n", scaleParam->xWidth, scaleParam->xHeight);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support Scale config\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
 EXIT:
     FunctionOut();
 
@@ -563,39 +761,123 @@ static OMX_ERRORTYPE SF_OMX_SetConfig(
     FunctionIn();
     if (hComponent == NULL)
     {
-        return OMX_ErrorBadParameter;
+        ret = OMX_ErrorBadParameter;
+        goto EXIT;
+    }
+
+    if (pComponentConfigStructure == NULL)
+    {
+        ret = OMX_ErrorBadParameter;
+        goto EXIT;
+    }
+
+    LOG(SF_LOG_INFO, "Set config on index %X\r\n", nIndex);
+    OMX_COMPONENTTYPE *pOMXComponent = (OMX_COMPONENTTYPE *)hComponent;
+    SF_OMX_COMPONENT *pSfOMXComponent = pOMXComponent->pComponentPrivate;
+    SF_CODAJ12_IMPLEMEMT *pSfMjpegImplement = (SF_CODAJ12_IMPLEMEMT *)pSfOMXComponent->componentImpl;
+
+    switch ((OMX_U32)nIndex)
+    {
+    case OMX_IndexConfigCommonOutputCrop:
+    {
+        OMX_CONFIG_RECTTYPE *rectParam = (OMX_CONFIG_RECTTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(rectParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            decConfig->roiOffsetX = rectParam->nLeft;
+            decConfig->roiOffsetY = rectParam->nTop;
+            decConfig->roiWidth = rectParam->nWidth;
+            decConfig->roiHeight = rectParam->nHeight;
+            decConfig->roiEnable = OMX_TRUE;
+            LOG(SF_LOG_INFO, "Set OutputCrop left %d top %d width %d height %d \r\n",
+                decConfig->roiOffsetX, decConfig->roiOffsetY, decConfig->roiWidth, decConfig->roiHeight);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only support set OutputCrop config to output port\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonRotate:
+    {
+        OMX_CONFIG_ROTATIONTYPE *rotatParam = (OMX_CONFIG_ROTATIONTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(rotatParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            decConfig->rotation = rotatParam->nRotation;
+            LOG(SF_LOG_INFO, "Set Rotation %d to output port\r\n", decConfig->rotation);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only support set Rotation config to output port\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonMirror:
+    {
+        OMX_CONFIG_MIRRORTYPE *mirrParam = (OMX_CONFIG_MIRRORTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        if(mirrParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            decConfig->mirror = mirrParam->eMirror;
+            LOG(SF_LOG_INFO, "Set Mirror %d \r\n", decConfig->mirror);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support Mirror config\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    case OMX_IndexConfigCommonScale:
+    {
+        OMX_CONFIG_SCALEFACTORTYPE *scaleParam = (OMX_CONFIG_SCALEFACTORTYPE *)pComponentConfigStructure;
+        DecConfigParam *decConfig = pSfMjpegImplement->config;
+        OMX_U32 x;
+        if(scaleParam->nPortIndex == (OMX_U32)(OMX_OUTPUT_PORT_INDEX))
+        {
+            /* In Q16 format */
+            x = (1 << 16) / (scaleParam->xWidth);
+            if(x >= 8)
+                decConfig->iHorScaleMode = 3;
+            else if(x >= 4)
+                decConfig->iHorScaleMode = 2;
+            else if(x >= 2)
+                decConfig->iHorScaleMode = 1;
+            else
+                decConfig->iHorScaleMode = 0;
+
+            x = (1 << 16) / (scaleParam->xHeight);
+            if(x >= 8)
+                decConfig->iVerScaleMode = 3;
+            else if(x >= 4)
+                decConfig->iVerScaleMode = 2;
+            else if(x >= 2)
+                decConfig->iVerScaleMode = 1;
+            else
+                decConfig->iVerScaleMode = 0;
+
+            LOG(SF_LOG_INFO, "Set scale H 1/%d, V 1/%d \r\n", 1 << decConfig->iHorScaleMode, 1 << scaleParam->xHeight);
+        }
+        else
+        {
+            LOG(SF_LOG_WARN, "Only output port support Scale config\r\n");
+            ret = OMX_ErrorBadParameter;
+        }
+        break;
+    }
+
+    default:
+        break;
     }
 EXIT:
     FunctionOut();
 
-    return ret;
-}
-
-static OMX_ERRORTYPE SF_OMX_GetExtensionIndex(
-    OMX_IN OMX_HANDLETYPE hComponent,
-    OMX_IN OMX_STRING cParameterName,
-    OMX_OUT OMX_INDEXTYPE *pIndexType)
-{
-    OMX_ERRORTYPE ret = OMX_ErrorNone;
-
-    FunctionIn();
-    //TODO
-    FunctionOut();
-    return ret;
-}
-
-static OMX_ERRORTYPE SF_OMX_GetComponentVersion(
-    OMX_IN OMX_HANDLETYPE hComponent,
-    OMX_OUT OMX_STRING pComponentName,
-    OMX_OUT OMX_VERSIONTYPE *pComponentVersion,
-    OMX_OUT OMX_VERSIONTYPE *pSpecVersion,
-    OMX_OUT OMX_UUIDTYPE *pComponentUUID)
-{
-    OMX_ERRORTYPE ret = OMX_ErrorNone;
-
-    FunctionIn();
-    //TODO
-    FunctionOut();
     return ret;
 }
 
@@ -606,27 +888,24 @@ static OMX_ERRORTYPE InitDecoder(SF_OMX_COMPONENT *pSfOMXComponent)
     JpgRet ret = JPG_RET_SUCCESS;
     DecConfigParam *decConfig = pSfCodaj12Implement->config;
     jpu_buffer_t *vbStream = &pSfCodaj12Implement->vbStream;
-    JpgDecOpenParam *decOP = &pSfCodaj12Implement->decOP;
-    JpgDecHandle handle = pSfCodaj12Implement->handle;
 
     ret = pSfCodaj12Implement->functions->JPU_Init();
     if (ret != JPG_RET_SUCCESS && ret != JPG_RET_CALLED_BEFORE)
     {
         LOG(SF_LOG_ERR, "JPU_Init failed Error code is 0x%x \r\n", ret);
-        return;
+        return ret;
     }
 
     decConfig->feedingMode = FEEDING_METHOD_BUFFER;
     LOG(SF_LOG_DEBUG, "feedingMode = %d, StreamEndian = %d\r\n", decConfig->feedingMode, decConfig->StreamEndian);
     if ((pSfCodaj12Implement->feeder = pSfCodaj12Implement->functions->BitstreamFeeder_Create(decConfig->bitstreamFileName, decConfig->feedingMode, (EndianMode)decConfig->StreamEndian)) == NULL)
     {
-        return;
+        return OMX_ErrorResourcesLost;
     }
 
     FunctionOut();
     return OMX_ErrorNone;
 
-ERR_DEC_INIT:
     pSfCodaj12Implement->functions->FreeFrameBuffer(pSfCodaj12Implement->instIdx);
 
     pSfCodaj12Implement->functions->jdi_free_dma_memory(vbStream);
@@ -636,40 +915,6 @@ ERR_DEC_INIT:
     return OMX_ErrorHardware;
 }
 
-static OMX_BOOL AdjustFrame(OMX_BUFFERHEADERTYPE* pBuffer, OMX_U32 nSrcWidth, OMX_U32 nSrcHeight,
-                            OMX_U32 nDestWidth, OMX_U32 nDestHeight)
-{
-    OMX_U32 nDeltaWidth = 0;
-    OMX_U32 nDeltaHeight = 0;
-
-    FunctionIn();
-
-    nDeltaWidth = nSrcWidth - nDestWidth;
-    nDeltaHeight = nSrcHeight - nDestHeight;
-
-    if (nDeltaWidth == 0 && nDeltaHeight == 0)
-    {
-        return OMX_TRUE;
-    }
-
-    if (nDeltaWidth != 0)
-    {
-        LOG(SF_LOG_ERR, "nSrcWidth != nDestWidth not supported\r\n");
-        return OMX_FALSE;
-    }
-
-    OMX_U8 *pDestCbCrStart = pBuffer->pBuffer + nDestHeight * nDestWidth;
-    OMX_U8 *pSrcCbCrStart = pBuffer->pBuffer + nDestHeight * nDestWidth + nDeltaHeight * nDestWidth;
-    OMX_U32 pCbCrSize =  nDestWidth * nDestHeight / 2;
-    LOG(SF_LOG_DEBUG, "pBuffer = %p, pDestCbCrStart = %p, pSrcCbCrStart = %p, pCbCrSize = %d\r\n",
-        pBuffer->pBuffer, pDestCbCrStart, pSrcCbCrStart, pCbCrSize);
-    memmove(pDestCbCrStart, pSrcCbCrStart, pCbCrSize);
-    pBuffer->nFilledLen = nDestHeight * nDestWidth * 3 / 2;
-
-    FunctionOut();
-
-    return OMX_TRUE;
-}
 
 static OMX_BOOL FillBufferDone(SF_OMX_COMPONENT *pSfOMXComponent, OMX_BUFFERHEADERTYPE *pBuffer)
 {
@@ -798,7 +1043,7 @@ static OMX_U32 FeedData(SF_OMX_COMPONENT *pSfOMXComponent)
     return nFilledLen;
 }
 
-static OMX_ERRORTYPE WaitForOutputBufferReady(SF_OMX_COMPONENT *pSfOMXComponent)
+static OMX_ERRORTYPE WaitForOutputBufferReady(SF_OMX_COMPONENT *pSfOMXComponent,OMX_BUFFERHEADERTYPE **ppOMXBuffer)
 {
     FunctionIn();
     OMX_ERRORTYPE ret = OMX_ErrorNone;
@@ -819,6 +1064,7 @@ static OMX_ERRORTYPE WaitForOutputBufferReady(SF_OMX_COMPONENT *pSfOMXComponent)
         pSfCodaj12Implement->bThreadRunning = OMX_FALSE;
         ret = OMX_ErrorNoMore;
     }
+    *ppOMXBuffer = pOMXBuffer;
     FunctionOut();
     return ret;
 }
@@ -827,7 +1073,6 @@ static void ProcessThread(void *args)
 {
     SF_OMX_COMPONENT *pSfOMXComponent = (SF_OMX_COMPONENT *)args;
     SF_CODAJ12_IMPLEMEMT *pSfCodaj12Implement = pSfOMXComponent->componentImpl;
-    BSFeeder feeder = pSfCodaj12Implement->feeder;
     jpu_buffer_t *vbStream = &pSfCodaj12Implement->vbStream;
     JpgDecInitialInfo *initialInfo = &pSfCodaj12Implement->initialInfo;
 
@@ -840,7 +1085,6 @@ static void ProcessThread(void *args)
     JpgDecOutputInfo outputInfo = {0};
     Int32 int_reason = 0;
     Int32 instIdx;
-    FrameFormat subsample;
     JpgRet ret = JPG_RET_SUCCESS;
 
     FunctionIn();
@@ -865,41 +1109,23 @@ static void ProcessThread(void *args)
     decOP->outputFormat = pSfCodaj12Implement->frameFormat; //decConfig->subsample;
     decOP->intrEnableBit = ((1 << INT_JPU_DONE) | (1 << INT_JPU_ERROR) | (1 << INT_JPU_BIT_BUF_EMPTY));
 
-    printf("streamEndian = %x  \n"
-           "frameEndian = %x   \n       "
-           "bitstreamBuffer = %x   \n   "
-           "bitstreamBufferSize = %x  \n"
-           "pBitStream = %x  \n         "
-           "chromaInterleave = %x  \n   "
-           "packedFormat = %x  \n       "
-           "roiEnable = %x   \n         "
-           "roiOffsetX = %x   \n        "
-           "roiOffsetY = %x  \n         "
-           "roiWidth = %x  \n           "
-           "roiHeight = %x   \n         "
-           "rotation = %x   \n          "
-           "mirror  = %x   \n           "
-           "pixelJustification = %x  \n "
-           "outputFormat = %x   \n "
-           "intrEnableBit = %x   \n ",
-           decOP->streamEndian,
-           decOP->frameEndian,
-           decOP->bitstreamBuffer,
-           decOP->bitstreamBufferSize,
-           //set virtual address map
-           decOP->pBitStream,
-           decOP->chromaInterleave,
-           decOP->packedFormat,
-           decOP->roiEnable,
-           decOP->roiOffsetX,
-           decOP->roiOffsetY,
-           decOP->roiWidth,
-           decOP->roiHeight,
-           decOP->rotation,
-           decOP->mirror,
-           decOP->pixelJustification,
-           decOP->outputFormat,
-           decOP->intrEnableBit);
+    LOG(SF_LOG_DEBUG, "streamEndian = %x\r\n", decOP->streamEndian);
+    LOG_APPEND(SF_LOG_DEBUG, "frameEndian = %x\r\n", decOP->frameEndian);
+    LOG_APPEND(SF_LOG_DEBUG, "bitstreamBuffer = %x\r\n", decOP->bitstreamBuffer);
+    LOG_APPEND(SF_LOG_DEBUG, "bitstreamBufferSize = %x\r\n", decOP->bitstreamBufferSize);
+    LOG_APPEND(SF_LOG_DEBUG, "pBitStream = %x\r\n", decOP->pBitStream);
+    LOG_APPEND(SF_LOG_DEBUG, "chromaInterleave = %x\r\n", decOP->chromaInterleave);
+    LOG_APPEND(SF_LOG_DEBUG, "packedFormat = %x\r\n", decOP->packedFormat);
+    LOG_APPEND(SF_LOG_DEBUG, "roiEnable = %x\r\n", decOP->roiEnable);
+    LOG_APPEND(SF_LOG_DEBUG, "roiOffsetX = %x\r\n", decOP->roiOffsetX);
+    LOG_APPEND(SF_LOG_DEBUG, "roiOffsetY = %x\r\n", decOP->roiOffsetY);
+    LOG_APPEND(SF_LOG_DEBUG, "roiWidth = %x\r\n", decOP->roiWidth);
+    LOG_APPEND(SF_LOG_DEBUG, "roiHeight = %x\r\n", decOP->roiHeight);
+    LOG_APPEND(SF_LOG_DEBUG, "rotation = %x\r\n", decOP->rotation);
+    LOG_APPEND(SF_LOG_DEBUG, "mirror = %x\r\n", decOP->mirror);
+    LOG_APPEND(SF_LOG_DEBUG, "pixelJustification = %x\r\n", decOP->pixelJustification);
+    LOG_APPEND(SF_LOG_DEBUG, "outputFormat = %x\r\n", decOP->outputFormat);
+    LOG_APPEND(SF_LOG_DEBUG, "intrEnableBit = %x\r\n", decOP->intrEnableBit);
 
     ret = pSfCodaj12Implement->functions->JPU_DecOpen(&handle, decOP);
     if (ret != JPG_RET_SUCCESS)
@@ -1039,12 +1265,15 @@ static void ProcessThread(void *args)
 
     while (pSfCodaj12Implement->bThreadRunning)
     {
-        if (WaitForOutputBufferReady(pSfOMXComponent) != OMX_ErrorNone)
+        OMX_BUFFERHEADERTYPE *pBuffer;
+
+        if (WaitForOutputBufferReady(pSfOMXComponent,&pBuffer) != OMX_ErrorNone)
         {
             continue;
         }
 
-        ret = pSfCodaj12Implement->functions->JPU_DecStartOneFrame(handle, &decParam);
+        LOG(SF_LOG_INFO, "pBuffer->pOutputPortPrivate:%d\r\n", (OMX_U64)(pBuffer->pOutputPortPrivate));
+        ret = pSfCodaj12Implement->functions->JPU_DecStartOneFrameBySerialNum(handle, &decParam,(OMX_U64)(pBuffer->pOutputPortPrivate));
         if (ret != JPG_RET_SUCCESS && ret != JPG_RET_EOS)
         {
             if (ret == JPG_RET_BIT_EMPTY)
@@ -1059,7 +1288,7 @@ static void ProcessThread(void *args)
                 continue;
             }
 
-            LOG(SF_LOG_ERR, "JPU_DecStartOneFrame failed Error code is 0x%x \n", ret);
+            LOG(SF_LOG_ERR, "JPU_DecStartOneFrameBySerialNum failed Error code is 0x%x \n", ret);
             return;
         }
         if (ret == JPG_RET_EOS)
@@ -1101,30 +1330,6 @@ static void ProcessThread(void *args)
             return;
         }
 
-        if (outputInfo.decodingSuccess == 0)
-            LOG(SF_LOG_ERR, "JPU_DecGetOutputInfo decode fail framdIdx %d \n", frameIdx);
-
-        LOG(SF_LOG_INFO, "%02d %04d  %8d     %8x %8x %10d  %8x  %8x %10d\n",
-            instIdx, frameIdx, outputInfo.indexFrameDisplay, outputInfo.bytePosFrameStart, outputInfo.ecsPtr, outputInfo.consumedByte,
-            outputInfo.rdPtr, outputInfo.wrPtr, outputInfo.frameCycle);
-
-        if (outputInfo.indexFrameDisplay == -1)
-            break;
-
-        FRAME_BUF *pFrame = pSfCodaj12Implement->functions->GetFrameBuffer(instIdx, outputInfo.indexFrameDisplay);
-        OMX_U8 *virtAddr = (OMX_U8 *)pFrame->vbY.virt_addr;
-        //TODO: Get OMX buffer by virt addr
-        OMX_BUFFERHEADERTYPE *pBuffer = GetOMXBufferByAddr(pSfOMXComponent, virtAddr);
-        if (pBuffer == NULL)
-        {
-            LOG(SF_LOG_ERR, "Could not find omx buffer by address\r\n");
-            LOG(SF_LOG_DEBUG, "OMX_EventBufferFlag IN\r\n");
-            pSfOMXComponent->callbacks->EventHandler(pSfOMXComponent->pOMXComponent, pSfOMXComponent->pAppData, OMX_EventBufferFlag,
-                                    1, 1, NULL);
-            LOG(SF_LOG_DEBUG, "OMX_EventBufferFlag OUT\r\n");
-            goto end;
-        }
-        ClearOMXBuffer(pSfOMXComponent, pBuffer);
         switch (pSfCodaj12Implement->frameFormat)
         {
         case FORMAT_420:
@@ -1143,8 +1348,6 @@ static void ProcessThread(void *args)
         
         LOG(SF_LOG_DEBUG, "decPicSize = [%d %d], pBuffer = %p\r\n",
             outputInfo.decPicWidth, outputInfo.decPicHeight, pBuffer->pBuffer);
-        OMX_U32 nDestHeight = pSfOMXComponent->portDefinition[OMX_OUTPUT_PORT_INDEX].format.video.nFrameHeight;
-        OMX_U32 nDestStride = pSfOMXComponent->portDefinition[OMX_OUTPUT_PORT_INDEX].format.video.nStride;
         // AdjustFrame(pBuffer, outputInfo.decPicWidth, outputInfo.decPicHeight, nDestStride, nDestHeight);
         FillBufferDone(pSfOMXComponent, pBuffer);
         // LOG(SF_LOG_DEBUG, "FillBufferDone IN\r\n");
@@ -1185,7 +1388,6 @@ static void ProcessThread(void *args)
     CodaJ12FlushBuffer(pSfOMXComponent, OMX_INPUT_PORT_INDEX);
     CodaJ12FlushBuffer(pSfOMXComponent, OMX_OUTPUT_PORT_INDEX);
     pSfCodaj12Implement->currentState = OMX_StateIdle;
-end:
     FunctionOut();
     ThreadExit(NULL);
 }
@@ -1325,20 +1527,6 @@ static OMX_ERRORTYPE SF_OMX_FreeBuffer(
     return ret;
 }
 
-static OMX_ERRORTYPE SF_OMX_UseEGLImage(
-    OMX_IN OMX_HANDLETYPE hComponent,
-    OMX_INOUT OMX_BUFFERHEADERTYPE **ppBufferHdr,
-    OMX_IN OMX_U32 nPortIndex,
-    OMX_IN OMX_PTR pAppPrivate,
-    OMX_IN void *eglImage)
-{
-    (void)hComponent;
-    (void)ppBufferHdr;
-    (void)nPortIndex;
-    (void)pAppPrivate;
-    (void)eglImage;
-    return OMX_ErrorNotImplemented;
-}
 
 static OMX_ERRORTYPE SF_OMX_ComponentConstructor(SF_OMX_COMPONENT *pSfOMXComponent)
 {
@@ -1381,20 +1569,26 @@ static OMX_ERRORTYPE SF_OMX_ComponentClear(SF_OMX_COMPONENT *pSfOMXComponent)
     OMX_ERRORTYPE ret = OMX_ErrorNone;
     SF_CODAJ12_IMPLEMEMT *pSfCodaj12Implement = pSfOMXComponent->componentImpl;
     jpu_buffer_t *vbStream = &pSfCodaj12Implement->vbStream;
-    JpgDecHandle handle = &pSfCodaj12Implement->handle;
+    JpgDecHandle handle = pSfCodaj12Implement->handle;
     FunctionIn();
-ERR_DEC_OPEN:
-    ret = pSfCodaj12Implement->functions->JPU_DecClose(handle);
-    if (ret != JPG_RET_SUCCESS)
+
+    if (pSfCodaj12Implement->functions->JPU_DecClose(handle) != JPG_RET_SUCCESS)
+    {
         LOG(SF_LOG_ERR, "\nDec End\r\n");
+        ret = OMX_ErrorHardware;
+    }
     pSfCodaj12Implement->functions->BitstreamFeeder_Destroy(pSfCodaj12Implement->feeder);
-ERR_DEC_INIT:
-    pSfCodaj12Implement->functions->FreeFrameBuffer(pSfCodaj12Implement->instIdx);
+
+
+    if(pSfCodaj12Implement->allocBufFlag == OMX_TRUE)
+    {
+        pSfCodaj12Implement->functions->FreeFrameBuffer(pSfCodaj12Implement->instIdx);
+    }
     pSfCodaj12Implement->functions->jdi_free_dma_memory(vbStream);
     pSfCodaj12Implement->functions->JPU_DeInit();
     // TODO
     // MjpegClearCommon(hComponent);
-EXIT:
+
     FunctionOut();
 
     return ret;

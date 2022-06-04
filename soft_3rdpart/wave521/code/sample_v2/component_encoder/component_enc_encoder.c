@@ -22,7 +22,7 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -793,6 +793,7 @@ static BOOL Encode(ComponentImpl* com, PortContainerYuv* in, PortContainerES* ou
     ctx->fullInterrupt      = FALSE;
 	//VLOG(INFO,"%s,%d\n",__func__,__LINE__);
     if ( out ) {
+        out->bufferType = encOutputInfo.reconFrameIndex;
         if (ctx->encOpenParam.ringBufferEnable ==  TRUE) {
             out->buf.phys_addr = encOutputInfo.rdPtr;
             out->size  = encOutputInfo.bitstreamSize;
